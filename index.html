@@ -179,6 +179,7 @@
   }
   .lti-input-row input:focus{ border-color:var(--blue); box-shadow:0 0 0 3px var(--blue-dim); }
   .lti-note{ font-size:9.5px; color:var(--text-faint); line-height:1.3; }
+  .lti-note strong{ color:var(--text-dim); font-weight:700; }
 
   .kpi-target-row{ display:flex; align-items:center; gap:5px; margin-top:1px; }
   .kpi-target-label{ font-size:9.5px; color:var(--text-faint); font-family:var(--font-mono); flex:none; }
@@ -521,7 +522,7 @@ const state = {
   targets: { recycle: null, calcine: null, diesel: null, paste: null, ni_recovery: null },
   // Nilai aktual manual — disimpan otomatis ke sheet "Target" kolom G/H/I (via Apps Script), jadi tetap ada setelah reload
   manualValues: { lti: null, diesel: null, paste: null, ni_recovery: null },
-  manualPeriods: { lti: null, diesel: null, paste: null, ni_recovery: null },
+  manualPeriods: { lti: {from:null,to:null}, diesel: {from:null,to:null}, paste: {from:null,to:null}, ni_recovery: {from:null,to:null} },
   // Rentang sumbu Y grafik trend — null berarti otomatis mengikuti data
   chartYRange: { min: null, max: null }
 };
@@ -642,6 +643,20 @@ function normalizeApiPayload(json){
   return null;
 }
 
+// Format teks periode "YYYY-MM s.d. YYYY-MM" (atau satu sisi saja) untuk disimpan ke sel Periode (kolom I)
+function formatPeriodeRange(range){
+  if(!range) return "";
+  if(range.from && range.to) return `${range.from} s.d. ${range.to}`;
+  return range.from || range.to || "";
+}
+// Parse balik teks dari sel Periode jadi {from, to}
+function parsePeriodeRange(text){
+  if(!text) return { from:null, to:null };
+  const parts = String(text).split(" s.d. ");
+  if(parts.length===2) return { from:parts[0]||null, to:parts[1]||null };
+  return { from:parts[0]||null, to:null };
+}
+
 function applyManualEntries(manualEntries){
   if(!manualEntries) return;
   Object.keys(MANUAL_ENTRY_KEY_MAP).forEach(kpiId=>{
@@ -649,7 +664,7 @@ function applyManualEntries(manualEntries){
     const entry = manualEntries[sheetKey];
     if(entry){
       state.manualValues[kpiId] = (entry.value===""||entry.value===null||entry.value===undefined||isNaN(Number(entry.value))) ? null : Number(entry.value);
-      state.manualPeriods[kpiId] = entry.periode || null;
+      state.manualPeriods[kpiId] = parsePeriodeRange(entry.periode);
     }
   });
 }
@@ -860,11 +875,17 @@ function buildKpiCardHtml(cfg, idx, rows){
         <input type="number" step="0.01" min="0" class="kpi-value-input" data-kpi="lti"
                placeholder="isi nilai" value="${value!==null && value!==undefined ? value : ""}">
       </div>
-      <div class="manual-both-field" style="margin-top:5px;">
-        <span class="kpi-target-label">Periode</span>
-        <input type="month" class="kpi-periode-input" data-kpi="lti" value="${periode || ""}">
+      <div class="manual-both-row" style="margin-top:5px;">
+        <div class="manual-both-field">
+          <span class="kpi-target-label">Periode Dari</span>
+          <input type="month" class="kpi-periode-input" data-kpi="lti" data-role="from" value="${periode.from || ""}">
+        </div>
+        <div class="manual-both-field">
+          <span class="kpi-target-label">Periode Sampai</span>
+          <input type="month" class="kpi-periode-input" data-kpi="lti" data-role="to" value="${periode.to || ""}">
+        </div>
       </div>
-      <div class="lti-note">Isi manual per periode · ${targetText} · tersimpan otomatis ke sheet Target</div>`;
+      <div class="lti-note">Isi manual per periode · <strong>${targetText}</strong> · tersimpan otomatis ke sheet Target</div>`;
     return cardShell(cfg, idx, status, "MANUAL", " manual", inner);
   }
 
@@ -965,7 +986,7 @@ function buildKpiCardHtml(cfg, idx, rows){
   if(cfg.kind === "manual_both"){
     const value = state.manualValues[cfg.id];
     const target = state.targets[cfg.id];
-    const periode = state.manualPeriods[cfg.id];
+    const periode = state.manualPeriods[cfg.id] || {from:null,to:null};
     const status = statusFor(cfg, value===null ? 0 : value, target);
     const gp = value!==null ? gaugePercent(cfg, value, target) : null;
     const inner = `
@@ -981,9 +1002,15 @@ function buildKpiCardHtml(cfg, idx, rows){
                  placeholder="isi target" value="${target!==null && target!==undefined ? target : ""}">
         </div>
       </div>
-      <div class="manual-both-field" style="margin-top:5px;">
-        <span class="kpi-target-label">Periode</span>
-        <input type="month" class="kpi-periode-input" data-kpi="${cfg.id}" value="${periode || ""}">
+      <div class="manual-both-row" style="margin-top:5px;">
+        <div class="manual-both-field">
+          <span class="kpi-target-label">Periode Dari</span>
+          <input type="month" class="kpi-periode-input" data-kpi="${cfg.id}" data-role="from" value="${periode.from || ""}">
+        </div>
+        <div class="manual-both-field">
+          <span class="kpi-target-label">Periode Sampai</span>
+          <input type="month" class="kpi-periode-input" data-kpi="${cfg.id}" data-role="to" value="${periode.to || ""}">
+        </div>
       </div>
       ${gp!==null ? `<div class="kpi-gauge ${status}"><i style="width:${gp}%"></i></div>` : `<div class="kpi-gauge neutral"><i style="width:100%"></i></div>`}
       <div class="lti-note">${cfg.unit} · nilai &amp; periode tersimpan otomatis ke sheet Target</div>`;
@@ -1025,15 +1052,17 @@ function renderKPIs(){
       const v = parseFloat(e.target.value);
       state.manualValues[id] = (e.target.value === "" || isNaN(v)) ? null : v;
       renderKPIs();
-      saveManualEntry(id, state.manualValues[id], state.manualPeriods[id]);
+      saveManualEntry(id, state.manualValues[id], formatPeriodeRange(state.manualPeriods[id]));
     });
   });
 
   document.querySelectorAll(".kpi-periode-input").forEach(inp=>{
     inp.addEventListener("change", (e)=>{
       const id = e.target.getAttribute("data-kpi");
-      state.manualPeriods[id] = e.target.value || null;
-      saveManualEntry(id, state.manualValues[id], state.manualPeriods[id]);
+      const role = e.target.getAttribute("data-role") || "from";
+      if(!state.manualPeriods[id]) state.manualPeriods[id] = { from:null, to:null };
+      state.manualPeriods[id][role] = e.target.value || null;
+      saveManualEntry(id, state.manualValues[id], formatPeriodeRange(state.manualPeriods[id]));
     });
   });
 
