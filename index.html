@@ -204,6 +204,12 @@
   }
   .manual-both-field .kpi-value-input:focus{ border-color:var(--blue); box-shadow:0 0 0 3px var(--blue-dim); }
   .manual-both-field .kpi-target-input:focus{ border-color:var(--amber); box-shadow:0 0 0 3px var(--amber-dim); }
+  .kpi-periode-input{
+    width:100%; background:var(--panel-3); border:1px solid var(--border); color:var(--text);
+    font-family:var(--font-mono); font-size:11px; border-radius:6px; padding:4px 6px; outline:none;
+    color-scheme: dark;
+  }
+  .kpi-periode-input:focus{ border-color:var(--blue); box-shadow:0 0 0 3px var(--blue-dim); }
 
   /* ===== Chart panel ===== */
   .chart-panel{
@@ -216,6 +222,19 @@
     font-size:12.5px; padding:7px 10px; border-radius:8px; outline:none; cursor:pointer;
   }
   .chart-canvas-wrap{ height:300px; margin-top:6px; }
+  .chart-yaxis-controls{
+    display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:8px;
+    font-family:var(--font-mono); font-size:11px; color:var(--text-faint);
+  }
+  .chart-yaxis-label{ text-transform:uppercase; letter-spacing:0.06em; font-size:10px; color:var(--text-faint); }
+  .chart-yaxis-field{ display:flex; align-items:center; gap:6px; }
+  .chart-yaxis-field input{
+    width:88px; background:var(--panel-2); border:1px solid var(--border); color:var(--text);
+    font-family:var(--font-mono); font-size:11.5px; padding:5px 8px; border-radius:6px; outline:none;
+  }
+  .chart-yaxis-field input:focus{ border-color:var(--blue); box-shadow:0 0 0 3px var(--blue-dim); }
+  .chart-yaxis-field input::placeholder{ color:var(--text-faint); }
+  .chart-yaxis-reset{ padding:5px 12px; font-size:11px; }
   .chart-readout{
     font-family:var(--font-mono); font-size:11.5px; color:var(--text-faint);
     background:var(--panel-2); border:1px solid var(--border); border-radius:8px;
@@ -329,6 +348,12 @@
       <div class="chart-controls">
         <select id="metricSelect"></select>
       </div>
+    </div>
+    <div class="chart-yaxis-controls">
+      <span class="chart-yaxis-label">Sumbu Y</span>
+      <label class="chart-yaxis-field">Min <input type="number" id="yAxisMin" placeholder="auto"></label>
+      <label class="chart-yaxis-field">Max <input type="number" id="yAxisMax" placeholder="auto"></label>
+      <button class="btn btn-ghost chart-yaxis-reset" id="yAxisReset" type="button">Reset</button>
     </div>
     <div class="chart-readout" id="chartReadout">Klik salah satu bar/titik untuk melihat nilainya</div>
     <div class="chart-canvas-wrap"><canvas id="trendChart"></canvas></div>
@@ -488,23 +513,28 @@ const state = {
   filtered: [],
   source: "sample",
   granularity: "daily",
-  ltiFr: 0.00,
   selectedMetric: "ni_packed",
   // Target dari sheet "Target" (auto-fetch via Apps Script)
   sheetTargets: {},
   _targetsPrefilled: false,
   // Target manual untuk KPI yang tidak ada di sheet Target (per sesi, tidak tersimpan permanen)
   targets: { recycle: null, calcine: null, diesel: null, paste: null, ni_recovery: null },
-  // Nilai aktual yang diisi manual (tidak ada sumber datanya sama sekali di GSheet)
-  manualValues: { diesel: null, paste: null, ni_recovery: null }
+  // Nilai aktual manual — disimpan otomatis ke sheet "Target" kolom G/H/I (via Apps Script), jadi tetap ada setelah reload
+  manualValues: { lti: null, diesel: null, paste: null, ni_recovery: null },
+  manualPeriods: { lti: null, diesel: null, paste: null, ni_recovery: null },
+  // Rentang sumbu Y grafik trend — null berarti otomatis mengikuti data
+  chartYRange: { min: null, max: null }
 };
+
+// Kunci KPI dashboard -> label baris di kolom G sheet "Target" (untuk simpan/baca Value & Periode)
+const MANUAL_ENTRY_KEY_MAP = { lti:"lti_fr", ni_recovery:"ni_recovery", diesel:"diesel", paste:"paste" };
 
 /* =========================================================================
    4) KPI CONFIG
    ========================================================================= */
 const KPI_CONFIG = [
   { id:"lti", label:"LTI-FR", unit:"per 1,000,000 jam kerja", kind:"manual_lti", group:"safety",
-    good:(v)=> v===0 ? "good" : (v<=1 ? "warn":"bad"), targetKey:"lti_fr" },
+    good:(v)=> (v===null||v===undefined) ? "neutral" : (v===0 ? "good" : (v<=1 ? "warn":"bad")), targetKey:"lti_fr" },
 
   { id:"ni_prod", label:"Total Ni Production", unit:"MT Ni", field:"ni_packed", agg:"sum", group:"cumulative",
     kind:"sum_auto_target", gaugeDir:"min", targetKey:"ni_product" },
@@ -585,7 +615,7 @@ async function loadData(){
       const parsed = normalizeApiPayload(json);
       if(!parsed) throw new Error("format tidak sesuai");
       if(parsed.records.length === 0) throw new Error("sheet belum ada data");
-      return { data: parsed.records, targets: parsed.targets, source: "live" };
+      return { data: parsed.records, targets: parsed.targets, manualEntries: parsed.manualEntries, source: "live" };
     }catch(e){
       console.warn("Gagal ambil data dari Apps Script:", e.message);
       // lanjut coba data.json lokal sebagai fallback berikutnya
@@ -598,25 +628,38 @@ async function loadData(){
     const json = await res.json();
     const parsed = normalizeApiPayload(json);
     if(!parsed || parsed.records.length===0) throw new Error("empty");
-    return { data: parsed.records, targets: parsed.targets, source: "live" };
+    return { data: parsed.records, targets: parsed.targets, manualEntries: parsed.manualEntries, source: "live" };
   }catch(e){
     // 3) Fallback terakhir: data contoh
-    return { data: SAMPLE_DATA, targets: {}, source: "sample" };
+    return { data: SAMPLE_DATA, targets: {}, manualEntries: {}, source: "sample" };
   }
 }
 
-// Terima dua bentuk payload: array polos (format lama/sample), atau {records:[...], targets:{...}} (format baru)
+// Terima dua bentuk payload: array polos (format lama/sample), atau {records, targets, manualEntries} (format baru)
 function normalizeApiPayload(json){
-  if(Array.isArray(json)) return { records: json, targets: {} };
-  if(json && Array.isArray(json.records)) return { records: json.records, targets: json.targets || {} };
+  if(Array.isArray(json)) return { records: json, targets: {}, manualEntries: {} };
+  if(json && Array.isArray(json.records)) return { records: json.records, targets: json.targets || {}, manualEntries: json.manualEntries || {} };
   return null;
 }
 
+function applyManualEntries(manualEntries){
+  if(!manualEntries) return;
+  Object.keys(MANUAL_ENTRY_KEY_MAP).forEach(kpiId=>{
+    const sheetKey = MANUAL_ENTRY_KEY_MAP[kpiId];
+    const entry = manualEntries[sheetKey];
+    if(entry){
+      state.manualValues[kpiId] = (entry.value===""||entry.value===null||entry.value===undefined||isNaN(Number(entry.value))) ? null : Number(entry.value);
+      state.manualPeriods[kpiId] = entry.periode || null;
+    }
+  });
+}
+
 async function initData(silent){
-  const { data, targets, source } = await loadData();
+  const { data, targets, manualEntries, source } = await loadData();
   state.all = data.slice().sort((a,b)=> a.date.localeCompare(b.date));
   state.source = source;
   state.sheetTargets = targets || {};
+  applyManualEntries(manualEntries);
 
   // Prefill sekali saja: target manual yang punya padanan di sheet Target dipakai sebagai nilai awal,
   // tapi tetap bisa ditimpa manual oleh user di dashboard.
@@ -745,7 +788,7 @@ function computeComplianceStats(rows, field, passFn, target){
 }
 
 function computeKpiValue(cfg, rows){
-  if(cfg.kind === "manual_lti") return state.ltiFr;
+  if(cfg.kind === "manual_lti") return state.manualValues.lti;
   if(cfg.kind === "manual_both") return state.manualValues[cfg.id];
   if(cfg.kind === "compliance"){
     const target = cfg.complianceTargetKey && state.sheetTargets[cfg.complianceTargetKey]!==undefined && state.sheetTargets[cfg.complianceTargetKey]!==null
@@ -811,11 +854,17 @@ function buildKpiCardHtml(cfg, idx, rows){
     const status = cfg.good(value);
     const sheetTarget = getTarget(cfg);
     const targetText = sheetTarget!==null ? `Target sheet: ${fmt(sheetTarget, 2)}` : "Target: 0";
+    const periode = state.manualPeriods.lti;
     const inner = `
       <div class="lti-input-row">
-        <input type="number" step="0.01" min="0" id="ltiInput" value="${state.ltiFr.toFixed(2)}">
+        <input type="number" step="0.01" min="0" class="kpi-value-input" data-kpi="lti"
+               placeholder="isi nilai" value="${value!==null && value!==undefined ? value : ""}">
       </div>
-      <div class="lti-note">Isi manual per periode · ${targetText}</div>`;
+      <div class="manual-both-field" style="margin-top:5px;">
+        <span class="kpi-target-label">Periode</span>
+        <input type="month" class="kpi-periode-input" data-kpi="lti" value="${periode || ""}">
+      </div>
+      <div class="lti-note">Isi manual per periode · ${targetText} · tersimpan otomatis ke sheet Target</div>`;
     return cardShell(cfg, idx, status, "MANUAL", " manual", inner);
   }
 
@@ -916,6 +965,7 @@ function buildKpiCardHtml(cfg, idx, rows){
   if(cfg.kind === "manual_both"){
     const value = state.manualValues[cfg.id];
     const target = state.targets[cfg.id];
+    const periode = state.manualPeriods[cfg.id];
     const status = statusFor(cfg, value===null ? 0 : value, target);
     const gp = value!==null ? gaugePercent(cfg, value, target) : null;
     const inner = `
@@ -931,8 +981,12 @@ function buildKpiCardHtml(cfg, idx, rows){
                  placeholder="isi target" value="${target!==null && target!==undefined ? target : ""}">
         </div>
       </div>
+      <div class="manual-both-field" style="margin-top:5px;">
+        <span class="kpi-target-label">Periode</span>
+        <input type="month" class="kpi-periode-input" data-kpi="${cfg.id}" value="${periode || ""}">
+      </div>
       ${gp!==null ? `<div class="kpi-gauge ${status}"><i style="width:${gp}%"></i></div>` : `<div class="kpi-gauge neutral"><i style="width:100%"></i></div>`}
-      <div class="lti-note">${cfg.unit} · isi manual, target dari sheet Target</div>`;
+      <div class="lti-note">${cfg.unit} · nilai &amp; periode tersimpan otomatis ke sheet Target</div>`;
     return cardShell(cfg, idx, status, "MANUAL", " manual manual-target", inner);
   }
 
@@ -956,14 +1010,6 @@ function renderKPIs(){
     container.innerHTML = html;
   });
 
-  const ltiInput = document.getElementById("ltiInput");
-  if(ltiInput){
-    ltiInput.addEventListener("change", (e)=>{
-      state.ltiFr = parseFloat(e.target.value) || 0;
-      renderKPIs();
-    });
-  }
-
   document.querySelectorAll(".kpi-target-input").forEach(inp=>{
     inp.addEventListener("change", (e)=>{
       const id = e.target.getAttribute("data-kpi");
@@ -979,11 +1025,35 @@ function renderKPIs(){
       const v = parseFloat(e.target.value);
       state.manualValues[id] = (e.target.value === "" || isNaN(v)) ? null : v;
       renderKPIs();
+      saveManualEntry(id, state.manualValues[id], state.manualPeriods[id]);
+    });
+  });
+
+  document.querySelectorAll(".kpi-periode-input").forEach(inp=>{
+    inp.addEventListener("change", (e)=>{
+      const id = e.target.getAttribute("data-kpi");
+      state.manualPeriods[id] = e.target.value || null;
+      saveManualEntry(id, state.manualValues[id], state.manualPeriods[id]);
     });
   });
 
   document.getElementById("kpiRangeNote").textContent =
     rows.length ? `${fmtDate(rows[0].date)} — ${fmtDate(rows[rows.length-1].date)} (${rows.length} hari)` : "Tidak ada data pada rentang ini";
+}
+
+// Simpan Nilai Aktual + Periode ke sheet "Target" (kolom G/H/I) lewat Apps Script, supaya tidak hilang saat reload/reset
+async function saveManualEntry(kpiId, value, periode){
+  const sheetKey = MANUAL_ENTRY_KEY_MAP[kpiId];
+  if(!sheetKey || !APPS_SCRIPT_URL) return;
+  try{
+    await fetch(APPS_SCRIPT_URL, {
+      method: "POST",
+      headers: { "Content-Type": "text/plain;charset=utf-8" }, // hindari CORS preflight ke Apps Script
+      body: JSON.stringify({ action:"saveManualEntry", key: sheetKey, value: value===null?"":value, periode: periode||"" })
+    });
+  }catch(e){
+    console.warn("Gagal simpan manual entry ke sheet Target:", e.message);
+  }
 }
 
 /* =========================================================================
@@ -992,6 +1062,7 @@ function renderKPIs(){
 const TREND_METRICS = [
   { field:"ni_packed", label:"Ni Production (MT Ni)", agg:"sum" },
   { field:"feni_packed", label:"FeNi Volume (MT)", agg:"sum" },
+  { field:"assay_ni_pct", label:"Ni Grade (%Ni)", agg:"avg" },
   { field:"ghe_kwh_per_ton", label:"GHE (kWh/ton calcine)", agg:"avg" },
   { field:"cf_pct", label:"Capacity Factor (%)", agg:"avg" },
   { field:"avg_power_mw", label:"Avg Power (MW)", agg:"avg" },
@@ -1026,7 +1097,14 @@ function renderChart(){
       select.appendChild(opt);
     });
     select.value = state.selectedMetric;
-    select.addEventListener("change", ()=>{ state.selectedMetric = select.value; renderChart(); });
+    select.addEventListener("change", ()=>{
+      state.selectedMetric = select.value;
+      // Rentang manual sumbu Y sering tidak relevan lagi untuk metrik baru -> kembali ke auto
+      state.chartYRange = { min:null, max:null };
+      const minInp = document.getElementById("yAxisMin"), maxInp = document.getElementById("yAxisMax");
+      if(minInp) minInp.value = ""; if(maxInp) maxInp.value = "";
+      renderChart();
+    });
   }
 
   const metric = TREND_METRICS.find(m=> m.field === state.selectedMetric) || TREND_METRICS[0];
@@ -1060,8 +1138,14 @@ function renderChart(){
   let minV = Math.min(...values, 0);
   if(maxV === minV){ maxV = minV + 1; }
   const range = maxV - minV;
-  const yMax = maxV + range * 0.12;
-  const yMin = minV - (minV < 0 ? range * 0.12 : 0);
+  const autoMax = maxV + range * 0.12;
+  const autoMin = minV - (minV < 0 ? range * 0.12 : 0);
+
+  const manualMin = state.chartYRange.min;
+  const manualMax = state.chartYRange.max;
+  let yMax = (manualMax !== null && !isNaN(manualMax)) ? manualMax : autoMax;
+  let yMin = (manualMin !== null && !isNaN(manualMin)) ? manualMin : autoMin;
+  if(yMin >= yMax){ yMin = autoMin; yMax = autoMax; } // proteksi kalau user isi min >= max
   const span = (yMax - yMin) || 1;
 
   function yPos(v){ return padT + plotH - ((v - yMin) / span) * plotH; }
@@ -1216,16 +1300,35 @@ window.addEventListener("resize", ()=>{
   window.__resizeT = setTimeout(()=> renderChart(), 150);
 });
 
+// Kontrol rentang sumbu Y grafik trend (manual, dengan tombol reset ke auto)
+document.getElementById("yAxisMin").addEventListener("change", (e)=>{
+  const v = parseFloat(e.target.value);
+  state.chartYRange.min = (e.target.value === "" || isNaN(v)) ? null : v;
+  renderChart();
+});
+document.getElementById("yAxisMax").addEventListener("change", (e)=>{
+  const v = parseFloat(e.target.value);
+  state.chartYRange.max = (e.target.value === "" || isNaN(v)) ? null : v;
+  renderChart();
+});
+document.getElementById("yAxisReset").addEventListener("click", ()=>{
+  state.chartYRange = { min:null, max:null };
+  document.getElementById("yAxisMin").value = "";
+  document.getElementById("yAxisMax").value = "";
+  renderChart();
+});
+
 renderSchema();
 initData(false);
 
 // Poll for a live data.json every 30s so the dashboard reflects GSheet updates automatically
 setInterval(async ()=>{
-  const { data, targets, source } = await loadData();
+  const { data, targets, manualEntries, source } = await loadData();
   if(source === "live"){
     state.all = data.slice().sort((a,b)=> a.date.localeCompare(b.date));
     state.source = "live";
     state.sheetTargets = targets || {};
+    applyManualEntries(manualEntries);
   }else{
     state.source = state.source; // keep whatever we had; don't flip live->sample on a transient failure basis alone
   }
